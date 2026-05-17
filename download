@@ -1,0 +1,137 @@
+import Papa from 'papaparse';
+import { db } from '../lib/firebase';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { fetchBangladeshHolidays } from './holidayService';
+
+export async function syncTodayAttendanceWithRoster(username: string, userId: string, rank: string = 'Agent') {
+  try {
+    const isQA = rank === 'QA';
+    const configPath = isQA ? 'roster_qa' : 'roster_agent_tl';
+    const configSnap = await getDoc(doc(db, 'configs', configPath));
+    if (!configSnap.exists()) return;
+
+    const config = configSnap.data();
+    if (!config.sheetUrl) return;
+
+    // Determine target sheet name
+    let targetSheetName = isQA ? config.sheetName : (rank === 'TL' ? (config.tlSheetName || config.agentSheetName) : config.agentSheetName);
+    if (!targetSheetName) return;
+
+    const today = new Date();
+    const currentDay = today.getDate();
+    
+    // Billing Month Logic: 16th of prev to 15th of curr belongs to curr month.
+    // If today is 16th or later, it belongs to the NEXT month's billing cycle.
+    const billingDate = currentDay >= 16 
+      ? new Date(today.getFullYear(), today.getMonth() + 1, 1) 
+      : today;
+    
+    const currentMonthStr = billingDate.toISOString().slice(0, 7); // YYYY-MM
+    const dateStr = today.toISOString().slice(0, 10); // YYYY-MM-DD
+    
+    // Only sync if the roster month matches the current month
+    if (config.month !== currentMonthStr) return;
+
+    // Check for Holiday
+    const holidays = await fetchBangladeshHolidays(today.getFullYear());
+    const isHoliday = holidays.some(h => h.date === dateStr);
+
+    // 1. Fetch CSV
+    let csvUrl = config.sheetUrl;
+    const sheetIdMatch = csvUrl.match(/\/d\/([a-zA-Z0-9-_]+)/);
+    if (sheetIdMatch) {
+      const sheetId = sheetIdMatch[1];
+      csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(targetSheetName)}`;
+    }
+
+    const response = await fetch(csvUrl);
+    if (!response.ok) return;
+    const csvText = await response.text();
+
+    return new Promise((resolve) => {
+      Papa.parse(csvText, {
+        complete: async (results) => {
+          const data = results.data as string[][];
+          
+          let headerRowIdx = -1;
+          let ossIdColIdx = -1;
+          for (let i = 0; i < Math.min(15, data.length); i++) {
+            const row = data[i];
+            const ossIdx = row.findIndex(cell => cell && cell.trim().replace(/\s+/g, '').toUpperCase() === 'OSSID');
+            if (ossIdx !== -1) {
+              ossIdColIdx = ossIdx;
+              headerRowIdx = i;
+              break;
+            }
+          }
+
+          if (headerRowIdx === -1) return resolve(false);
+          const headerRow = data[headerRowIdx];
+          
+          const normalize = (s: any) => s ? s.toString().trim().replace(/\s+/g, '').toUpperCase() : '';
+          const targetUserNormalized = normalize(username);
+
+          const userRow = data.find(row => {
+            if (ossIdColIdx !== -1) {
+              const cell = row[ossIdColIdx];
+              return cell && normalize(cell) === targetUserNormalized;
+            }
+            return row.some(cell => cell && normalize(cell) === targetUserNormalized);
+          });
+
+          if (!userRow) return resolve(false);
+
+          let todayColIdx = -1;
+          headerRow.forEach((cell, idx) => {
+            if (!cell) return;
+            const clean = cell.trim();
+            let dateNum = parseInt(clean);
+            if (isNaN(dateNum) || clean.includes('-')) {
+              const match = clean.match(/^(\d{1,2})/);
+              if (match) dateNum = parseInt(match[1]);
+            }
+            if (dateNum === currentDay) todayColIdx = idx;
+          });
+
+          if (todayColIdx === -1) return resolve(false);
+          const shiftValue = (userRow[todayColIdx] || '').trim().toUpperCase();
+          
+          const attendanceId = `${userId}_${dateStr}`;
+          const attRef = doc(db, 'attendance', attendanceId);
+          
+          let targetStatus: 'present' | 'ot' | 'off-day' | null = null;
+          
+          const isShift = ['M', 'E', 'N', 'E.BACKUP', 'MORNING', 'EVENING', 'NIGHT'].some(s => 
+            shiftValue === s || (s === 'EVENING' && shiftValue.startsWith('E.'))
+          );
+
+          if (isShift) {
+            // Priority: If shifted on a Holiday, it's OT. Else Present.
+            targetStatus = isHoliday ? 'ot' : 'present';
+          } else if (['OFF', 'LEFT'].includes(shiftValue)) {
+            targetStatus = 'off-day';
+          } else if (['H', 'HOLIDAY', 'OT'].includes(shiftValue)) {
+            targetStatus = 'ot';
+          }
+
+          if (targetStatus) {
+            await setDoc(attRef, {
+              userId,
+              date: dateStr,
+              month: currentMonthStr,
+              status: targetStatus,
+              autoSynced: true,
+              updatedAt: new Date().toISOString()
+            }, { merge: true });
+            resolve(true);
+          } else {
+            resolve(false);
+          }
+        }
+      });
+    });
+  } catch (err) {
+    console.error('Roster sync error:', err);
+    return false;
+  }
+}

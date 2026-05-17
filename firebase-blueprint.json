@@ -1,0 +1,157 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "username": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "lastSeen": { "type": "string", "format": "date-time" },
+        "active": { "type": "boolean" },
+        "warning": { "type": "string" },
+        "warningSeen": { "type": "boolean" },
+        "warningTimestamp": { "type": "number" },
+        "isBanned": { "type": "boolean" }
+      },
+      "required": ["name", "username", "createdAt"]
+    },
+    "SalarySettings": {
+      "title": "Salary Settings",
+      "description": "User's monthly base salary or daily wage settings",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "amount": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "amount", "updatedAt"]
+    },
+    "AttendanceRecord": {
+      "title": "Attendance Record",
+      "description": "Individual attendance record for a specific date",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "date": { "type": "string", "description": "YYYY-MM-DD" },
+        "month": { "type": "string", "description": "YYYY-MM" },
+        "status": { "type": "string", "enum": ["present", "ot", "off-day"] }
+      },
+      "required": ["userId", "date", "month", "status"]
+    },
+    "KPIRecord": {
+      "title": "KPI Record",
+      "description": "User monthly shift and grade rating",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "month": { "type": "string", "description": "YYYY-MM" },
+        "shift": { "type": "string", "enum": ["morning", "evening", "night"] },
+        "grade": { "type": "string", "enum": ["A", "B", "C"] }
+      },
+      "required": ["userId", "month", "shift", "grade"]
+    },
+    "AccuracyRecord": {
+      "title": "Accuracy Record",
+      "description": "Daily cases and errors tracking",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "date": { "type": "string", "description": "YYYY-MM-DD" },
+        "month": { "type": "string", "description": "YYYY-MM" },
+        "cases": { "type": "number" },
+        "errors": { "type": "number" }
+      },
+      "required": ["userId", "date", "month", "cases", "errors"]
+    },
+    "RosterConfig": {
+      "title": "Roster Configuration",
+      "description": "Settings for monthly rosters pulled from Google Sheets",
+      "type": "object",
+      "properties": {
+        "sheetUrl": { "type": "string" },
+        "sheetName": { "type": "string" },
+        "month": { "type": "string", "description": "YYYY-MM" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["sheetUrl", "sheetName", "month"]
+    },
+    "Chat": {
+      "title": "Chat",
+      "description": "A conversation between two users",
+      "type": "object",
+      "properties": {
+        "participants": { "type": "array", "items": { "type": "string" } },
+        "lastMessage": { "type": "string" },
+        "lastSenderId": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["participants", "updatedAt"]
+    },
+    "Message": {
+      "title": "Message",
+      "description": "A single message in a chat",
+      "type": "object",
+      "properties": {
+        "senderId": { "type": "string" },
+        "text": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["senderId", "text", "createdAt"]
+    },
+    "PremiumRequest": {
+      "title": "Premium Request",
+      "description": "Request for premium account upgrade",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "username": { "type": "string" },
+        "name": { "type": "string" },
+        "mobile": { "type": "string" },
+        "transactionId": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "username", "name", "mobile", "transactionId", "status", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Public and private user profile data"
+    },
+    "/salary_settings/{userId}": {
+      "schema": "SalarySettings",
+      "description": "Salary amount configuration for each user"
+    },
+    "/attendance/{recordId}": {
+      "schema": "AttendanceRecord",
+      "description": "Daily attendance logs"
+    },
+    "/accuracy/{recordId}": {
+      "schema": "AccuracyRecord",
+      "description": "Daily accuracy logs"
+    },
+    "/kpi/{recordId}": {
+      "schema": "KPIRecord",
+      "description": "Monthly KPI settings"
+    },
+    "/configs/roster": {
+      "schema": "RosterConfig",
+      "description": "Global roster configuration"
+    },
+    "/chats/{chatId}": {
+      "schema": "Chat",
+      "description": "Conversation meta-data"
+    },
+    "/chats/{chatId}/messages/{messageId}": {
+      "schema": "Message",
+      "description": "Individual messages within a chat"
+    },
+    "/premium_requests/{requestId}": {
+       "schema": "PremiumRequest",
+       "description": "Premium upgrade application logs"
+    }
+  }
+}

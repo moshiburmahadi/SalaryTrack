@@ -1,0 +1,214 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Default Deny Catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 0.1 Global Helpers
+    function isSignedIn() { return request.auth != null; }
+    
+    // SuperAdmin whitelist - used for managing admins and critical system moderation
+    function isSuperAdmin() { 
+      return isSignedIn() && 
+        request.auth.token.get('email', '').lower() in ['bd-gx@tracker.app', 'moshibur.mahadi@gmail.com'];
+    }
+    
+    // Admin check - either a whitelisted email or explicitly identified in the system
+    function isAdmin() { 
+      return isSuperAdmin() || (
+        isSignedIn() && (
+          exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('isAdmin', false) == true
+        )
+      );
+    }
+
+    function isTL() {
+      return isSignedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('rank', '') == 'TL';
+    }
+    
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    
+    // 0.2 Validation Blueprints
+    function isValidUser(data) {
+      return data.keys().hasAll(['name', 'username', 'createdAt']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 200 &&
+             data.username is string && data.username.size() > 0 && data.username.size() <= 100 &&
+             (!('rank' in data) || data.rank in ['Agent', 'QA', 'TL']) &&
+             data.createdAt == request.time;
+    }
+
+    function isValidHeartbeat(data) {
+      return (data.active is bool) &&
+             (data.lastSeen == request.time);
+    }
+
+    function isValidSalary(data) {
+      return data.keys().hasAll(['userId', 'amount', 'updatedAt']) &&
+             data.keys().size() == 3 &&
+             data.userId == request.auth.uid &&
+             data.amount is number && data.amount >= 0 &&
+             data.updatedAt == request.time;
+    }
+
+    function isValidAttendance(data) {
+      return data.keys().hasAll(['userId', 'date', 'month', 'status']) &&
+             (data.keys().size() >= 4 && data.keys().size() <= 6) &&
+             data.userId == request.auth.uid &&
+             data.date is string && data.date.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
+             data.month is string && data.month.matches('^\\d{4}-\\d{2}$') &&
+             data.status in ['present', 'ot', 'off-day'] &&
+             (!('autoSynced' in data) || data.autoSynced is bool) &&
+             (!('updatedAt' in data) || data.updatedAt is string);
+    }
+
+    function isValidAccuracy(data) {
+      return data.keys().hasAll(['userId', 'date', 'month', 'cases', 'errors']) &&
+             data.keys().size() == 5 &&
+             data.userId == request.auth.uid &&
+             data.date is string && data.date.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
+             data.month is string && data.month.matches('^\\d{4}-\\d{2}$') &&
+             data.cases is number && data.cases >= 0 &&
+             data.errors is number && data.errors >= 0;
+    }
+
+    function isValidKPI(data) {
+      return data.keys().hasAll(['userId', 'month', 'shift', 'grade']) &&
+             data.keys().size() == 4 &&
+             data.userId == request.auth.uid &&
+             data.month is string && data.month.matches('^\\d{4}-\\d{2}$') &&
+             data.shift in ['morning', 'evening', 'night'] &&
+             data.grade in ['A', 'B', 'C'];
+    }
+
+    // 1. Users Collection
+    match /users/{userId} {
+      allow get, list: if true; 
+
+      allow create: if isOwner(userId) && (
+        (isValidUser(incoming()) && (
+          incoming().keys().size() == 3 || 
+          (incoming().keys().size() >= 4 && ('isAdmin' in incoming() && isSuperAdmin() || 'rank' in incoming() || 'password' in incoming()))
+        )) ||
+        (isValidHeartbeat(incoming()) && incoming().keys().size() == 2)
+      );
+
+      allow update: if (isOwner(userId) || isAdmin()) && (
+        // Action: Heartbeat
+        (incoming().diff(existing()).affectedKeys().hasOnly(['lastSeen', 'active']) && (
+          (incoming().get('lastSeen', null) == request.time || (incoming().get('lastSeen', null) == existing().get('lastSeen', null))) &&
+          (incoming().get('active', true) is bool)
+        )) ||
+        // Action: Dismiss Warning (Owner Only)
+        (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['warningSeen']) && 
+         incoming().get('warningSeen', false) is bool) ||
+        // Action: Self-Profile Initialization/Update
+        (isOwner(userId) && (
+          incoming().diff(existing()).affectedKeys().hasAny(['name', 'username', 'photoURL', 'updatedAt', 'password'])
+        )) ||
+        // Action: Admin Moderation
+        ((isAdmin() || isTL()) && (
+          incoming().diff(existing()).affectedKeys().hasAny(['warning', 'warningSeen', 'warningTimestamp', 'isBanned', 'username', 'name', 'rank', 'verified', 'password'])
+        )) ||
+        // Action: Admin Escalation (SuperAdmin Only)
+        (isSuperAdmin() && incoming().diff(existing()).affectedKeys().hasAny(['isAdmin']))
+      );
+    }
+
+    // 2. Salary Settings
+    match /salary_settings/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin() || (isSignedIn() && resource.id == request.auth.uid);
+      allow create, update: if (isOwner(userId) || isAdmin()) && (
+        isAdmin() || isValidSalary(incoming())
+      );
+    }
+
+    // 3. Activity Collections
+    match /attendance/{recordId} {
+      allow get, list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && (incoming().userId == request.auth.uid || isAdmin()) && (isAdmin() || (isValidAttendance(incoming()) && isValidId(recordId)));
+      allow update: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin()) && (isAdmin() || isValidAttendance(incoming()));
+      allow delete: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+    }
+
+    match /accuracy/{recordId} {
+      allow get, list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && (incoming().userId == request.auth.uid || isAdmin()) && (isAdmin() || (isValidAccuracy(incoming()) && isValidId(recordId)));
+      allow update: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin()) && (isAdmin() || isValidAccuracy(incoming()));
+      allow delete: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+    }
+
+    match /kpi/{recordId} {
+      allow get, list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && (incoming().userId == request.auth.uid || isAdmin()) && (isAdmin() || (isValidKPI(incoming()) && isValidId(recordId)));
+      allow update: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin()) && (isAdmin() || isValidKPI(incoming()));
+      allow delete: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+    }
+
+    // 4. Admin Management
+    match /admins/{adminId} {
+      allow read: if isSignedIn();
+      allow write: if isSuperAdmin();
+    }
+
+    // 5. Global Config
+    match /config/kpi_bonuses_by_shift {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /configs/roster {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /configs/roster_agent_tl {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /configs/roster_qa {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // 6. Chat System
+    match /chats/{chatId} {
+      allow create: if isSignedIn() && request.auth.uid in request.resource.data.participants;
+      allow get: if isSignedIn() && (resource == null || request.auth.uid in resource.data.participants);
+      allow list, update: if isSignedIn() && request.auth.uid in resource.data.participants;
+      
+      // Messages subcollection
+      match /messages/{messageId} {
+        allow read: if isSignedIn() && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants;
+        allow create: if isSignedIn() && 
+          request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants &&
+          request.resource.data.senderId == request.auth.uid &&
+          (
+            // Either it's the first message or I am not the last sender
+            get(/databases/$(database)/documents/chats/$(chatId)).data.get('lastSenderId', '') != request.auth.uid
+          );
+      }
+    }
+
+    // 7. Verification Requests
+    match /verification_requests/{requestId} {
+      allow list, get: if isAdmin() || isTL();
+      allow create: if isSignedIn() && incoming().userId == request.auth.uid && incoming().status == 'pending';
+      allow update: if isAdmin() || isTL();
+    }
+
+    // 8. Premium Upgrade Requests
+    match /premium_requests/{requestId} {
+      allow list, get: if isAdmin();
+      allow create: if isSignedIn() && incoming().userId == request.auth.uid && incoming().status == 'pending';
+      allow update: if isAdmin();
+    }
+  }
+}
